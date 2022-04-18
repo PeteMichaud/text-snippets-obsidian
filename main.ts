@@ -13,7 +13,7 @@ export default class TextSnippets extends Plugin {
 	onInit() {}
 
 	async onload() {
-		console.log("Loading snippetLookup plugin");
+		console.log("Loading snippets plugin");
 		await this.loadSettings();
 		this.addCommand({
 			id: "text-snippets",
@@ -49,7 +49,7 @@ export default class TextSnippets extends Plugin {
 	}
 
 	async onunload() {
-		console.log("Unloading text snippet plugin");
+		console.log("Unloading text snippets plugin");
 
 		this.app.workspace.off('keydown', this.handleKeyDown);
 
