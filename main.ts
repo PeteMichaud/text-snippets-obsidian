@@ -1,18 +1,14 @@
-import {
-	App,
-	Plugin,
-	PluginSettingTab,
-	Setting,
-	MarkdownView,
-	Editor
-} from "obsidian";
+import {App, Editor, EditorPosition, MarkdownView, Plugin, PluginSettingTab, Setting} from "obsidian";
+import { regexLastIndexOf } from "./utils";
 
 export default class TextSnippets extends Plugin {
 	settings: TextSnippetsSettings;
+	useLegacyEditor: boolean;
+	singleWhitespace: RegExp = new RegExp(/\s/, 'g');
 
 	async onload() {
 		console.log("Loading snippets plugin");
-		await this.loadSettings();
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 		this.addCommand({
 			id: "text-snippets",
 			name: "Run snippet replacement",
@@ -23,15 +19,16 @@ export default class TextSnippets extends Plugin {
 			}],
 		});
 
-        if (this.settings.isWYSIWYG) {
-            this.app.workspace.onLayoutReady(() => {
-				const editor = this.getEditor();
-				if(editor === null) return;
+		//suppressing error on undocumented api call
+		// @ts-ignore
+		this.useLegacyEditor = this.app.vault.getConfig('legacyEditor');
 
-                this.settings.isWYSIWYG = (typeof editor.wordAt === 'function');
-                this.registerDomEvent(document, 'keydown', (event) => this.handleKeyDown(event));
-            }
-        )}
+		this.app.workspace.onLayoutReady(() => {
+			this.settings.isWYSIWYG = !this.useLegacyEditor;
+			//This isn't right. I suspect the right thing is the.app.workspace.on('editor-change', (editor) => this.handleKeyDown(editor))
+			//and handleKeyDown should begin by getting (the.app.lastEvent as KeyboardEvent) and aborting if it's not a keyboard event?
+			this.registerDomEvent(document, 'keydown', (event) => this.handleKeyDown(event));
+		});
 
 		this.addSettingTab(new TextSnippetsSettingsTab(this.app, this));
 		await this.saveSettings();
@@ -40,87 +37,70 @@ export default class TextSnippets extends Plugin {
 	async onunload() {
 		console.log("Unloading text snippets plugin");
 
+		//I think the line below is wrong. That event was never registered.
+		//if I make the change described in the onload comment, I would be able to do something like:
+		//this.app.workspace.off('editor-change', this.handleKeyDown);
+
 		this.app.workspace.off('keydown', this.handleKeyDown);
-
-		this.registerCodeMirror((editor) => {
-			this.settings.isWYSIWYG = (typeof editor.wordAt === 'function');
-			// the callback has to be called through another function in order for 'this' to work
-			editor.off('keydown', (ed, event) => this.handleKeyDown(ed, event));
-		});
-	}
-
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings)
 	}
 
-	UpdateSplit(newlineSymbol: string) {
+	UpdateSnippetLookup(newlineSymbol: string) {
 		const nlSymb = newlineSymbol.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
 		const regex = new RegExp('(?<!' + nlSymb +')\\n');
 
-		this.settings.snippetLookup =
-			this.settings.snippets_file
-				.split(regex)
-				.reduce((obj, [snippetId, replacement]) => {
-					return ({...obj, [snippetId]: replacement})
-				}, {});
+		this.settings.snippetLookup = this.settings.snippets_file
+			.split(regex)
+			.reduce((obj, [snippetId, replacement]) => {
+				return ({...obj, [snippetId]: replacement})
+			}, {});
 	}
 
-	getSelectedText(editor: Editor) {
-		if (!editor.somethingSelected()) {
-			const wordBoundaries = this.getWordBoundaries(editor);
-			editor.getDoc().setSelection(wordBoundaries.start, wordBoundaries.end);
+	getPotentialSnippetId(editor: Editor) {
+		if(editor.somethingSelected()) {
+			return editor.getSelection();
 		}
 
-		return editor.getSelection();
-	}
-
-	getWordBoundaries(editor: Editor) {
 		const cursor = editor.getCursor();
+		const leftOfCursor = editor.getLine(cursor.line).slice(0, cursor.ch).trimEnd();
+		let lastWhitespace = regexLastIndexOf(leftOfCursor, this.singleWhitespace);
+		if(lastWhitespace < 0) lastWhitespace = 0;
 
-		let wordStart: number;
-		let wordEnd: number;
-
-		if(!this.settings.isWYSIWYG) {
-			const word = editor.findWordAt(cursor);
-			wordStart = word.anchor.ch;
-			wordEnd = word.head.ch;
-		} else {
-			const word = editor.wordAt(cursor);
-			wordStart = word.from.ch;
-			wordEnd = word.to.ch;
-		}
-
-		return {
-			start: {
-				line: cursor.line,
-				ch: wordStart
-			},
-			end: {
-				line: cursor.line,
-				ch: wordEnd
-			},
-		};
+		return leftOfCursor.slice(lastWhitespace);
 	}
 
-	findSnippet(editor : Editor, cursorOrig: CodeMirror.Position, cursor: CodeMirror.Position) : string {
-		let selectedText = this.getSelectedText(editor);
-		const wordDelimiters = Array.from(this.settings.wordDelimiters);
-		const selectedWoSpaces = selectedText.split(' ').join('');
+	findSnippet(editor : Editor, cursorOrig: EditorPosition, cursor: EditorPosition) : string {
+		let potentialSnippetId = this.getPotentialSnippetId(editor);
 
-		if (selectedWoSpaces === '' || wordDelimiters.indexOf(selectedWoSpaces[0]) >= 0 && cursorOrig.ch == cursor.ch) {
+		//I'm not sure this is necessary anymore.
+		// First of all, the new getPotentialSnippetId logic splits on spaces, so I think the WoSpaces var is unnecessary
+		// also I don't quite understand the logic:
+		// 	if the potentialSnippet is blank (ie there is nothing at all to the left of the cursor)
+		//		then we should move left (why twice?) and try again. I guess because maybe it's trying to find the token
+		//		on the line above? Is that what I want?
+		// 	else if the token begins with one of the custom word delimiter special characters and cursorOrig is the same as cursor
+		// 		cursorOrig is from editor.getCursor() while cursor is editor.getCursor('from')
+		// 			what is the difference? When would these be different?
+		//      then try moving left and getting a new snippet. Why would I want this?
+		// Last, if I really do want to try to move backward until I find a token to try, shouldn't I "loop while" until
+		//   I get something or until the beginning of the file? This seems like the natural way to do this logic,
+		//   assuming I want this logic at all
+
+		const psidWoSpaces = potentialSnippetId.split(' ').join('');
+		if (psidWoSpaces === '' ||
+			this.settings.wordDelimiterArray.indexOf(psidWoSpaces[0]) >= 0 && cursorOrig.ch == cursor.ch) {
 			editor.exec('goWordLeft');
 			editor.exec('goWordLeft');
-			selectedText = this.getSelectedText(editor);
+			potentialSnippetId = this.getPotentialSnippetId(editor);
 		}
 
-		return this.settings.snippetLookup[selectedText] ?? "";
+		return this.settings.snippetLookup[potentialSnippetId] ?? "";
 	}
 
-	calculateCursorStopPos(nStr: string, cursor: CodeMirror.Position): [string, {nlinesCount: number, position: number}] {
+	calculateCursorStopPos(nStr: string, cursor: EditorPosition): [string, {nlinesCount: number, position: number}] {
 
 		const nlSymb = this.settings.newlineSymbol;
 		const strReplacementWoNewlines = nStr.split('\n').join('');
@@ -152,9 +132,7 @@ export default class TextSnippets extends Plugin {
 		return [strReplacement, {nlinesCount: nlinesCount, position: stopPosIndex}]
 	}
 
-	insertSnippet(key: string = ''): boolean {
-		const editor = this.getEditor();
-		if(editor === null) return;
+	insertSnippet(editor: Editor, key: string = ''): boolean {
 
 		const cursorOrig = editor.getCursor();
 		const cursorStart = editor.getCursor('from');
@@ -163,6 +141,7 @@ export default class TextSnippets extends Plugin {
 		const strSnippet = this.findSnippet(editor, cursorOrig, cursorStart);
 
 		//proceed Tab and Spacebar
+		//I think this is for the tab stop logic?
 		if (strSnippet === "" ||
 			(key === 'Space' && (cursorOrig.ch !== cursorEnd.ch || cursorOrig.line !== cursorEnd.line)) )  {
 			if (!editor.somethingSelected()) {
@@ -171,8 +150,8 @@ export default class TextSnippets extends Plugin {
 			if (key === 'Space') return false;
 			if (strSnippet === "") {
 				editor.setCursor(cursorOrig);
-				return this.nextStop();
-			}	
+				return this.nextStop(editor);
+			}
 		}
 
 		const [strReplacement, endPosition] = this.calculateCursorStopPos(strSnippet, cursorStart);
@@ -186,7 +165,7 @@ export default class TextSnippets extends Plugin {
 				ch: cursorStart.ch
 			});
 
-			return this.nextStop();
+			return this.nextStop(editor);
 		} else {
 			editor.setCursor({
 				line: cursorStart.line + endPosition.nlinesCount,
@@ -199,20 +178,20 @@ export default class TextSnippets extends Plugin {
 	}
 
 	handleKeyDown (event: KeyboardEvent): void {
-		if ((event.key === 'Tab' && this.settings.useTab) || (event.code === 'Space' && this.settings.useSpace)) {
+		if ((this.settings.useTab && event.key === 'Tab') || (this.settings.useSpace && event.code === 'Space')) {
 			this.SnippetOnTrigger(event.code, true, event);
 		}
 	}
 
-	SnippetOnTrigger(key: string = '', preventDefault: boolean = false, event?: KeyboardEvent) {
+	SnippetOnTrigger(key: string = '', preventDefault: boolean = false, event?: KeyboardEvent): void {
 		const editor = this.getEditor();
 		if(editor === null) return;
 
 		const cursorStart = editor.getCursor();
 
-		if (!this.insertSnippet(key)) return;
+		if (!this.insertSnippet(editor, key)) return;
 
-		this.settings.isWYSIWYG = (typeof editor.wordAt === 'function');
+		this.settings.isWYSIWYG = !this.useLegacyEditor;
 
 		if (preventDefault) {
 			event.preventDefault();
@@ -225,7 +204,7 @@ export default class TextSnippets extends Plugin {
 			}
 		}
 
-		if (cursorStart.ch >=0 && cursorStart.line >= 0) {		//paste text from clipboard
+		if (cursorStart.ch > -1 && cursorStart.line > -1) {		//paste text from clipboard
 			navigator.clipboard.readText().then(
 				(clipText) => {
 					const search = this.settings.isWYSIWYG
@@ -240,10 +219,7 @@ export default class TextSnippets extends Plugin {
 		}
 	}
 
-	nextStop(): boolean {
-
-		const editor = this.getEditor();
-		if(editor === null) return;
+	nextStop(editor: Editor): boolean {
 
 		const search = this.settings.isWYSIWYG
 			? editor.searchCursor(this.settings.stopSymbol, editor.getCursor())
@@ -252,11 +228,12 @@ export default class TextSnippets extends Plugin {
 		if (search.findNext()) {
 			search.replace("");
 
-			if(!this.settings.isWYSIWYG) {
-				editor.setCursor(search.from());
-			} else {
-				editor.setCursor(search.current().from);
-			}
+			const cursorTo =  this.settings.isWYSIWYG
+				? search.current().from
+				: search.from();
+
+			editor.setCursor(cursorTo);
+
 			return true;
 		}
 
@@ -280,11 +257,12 @@ interface TextSnippetsSettings {
 	useTab: boolean;
 	useSpace: boolean;
 	wordDelimiters: string;
+	wordDelimiterArray: string[],
 	isWYSIWYG: boolean;
 }
 
 const DEFAULT_SETTINGS: TextSnippetsSettings = {
-	snippets_file: "snippetLookup : It is an obsidian plugin, that replaces your selected text.",
+	snippets_file: "snippets : It is an obsidian plugin, that replaces your selected text.",
 	snippetLookup : { "snippets": "It is an obsidian plugin, that replaces your selected text."},
 	endSymbol: '$end$',
 	newlineSymbol: '$nl$',
@@ -293,6 +271,7 @@ const DEFAULT_SETTINGS: TextSnippetsSettings = {
 	useTab: true,
 	useSpace: false,
 	wordDelimiters: "$()[]{}<>,.!?;:\'\"\\/",
+	wordDelimiterArray: Array.from("$()[]{}<>,.!?;:\'\"\\/"),
 	isWYSIWYG: false,
 }
 
@@ -312,15 +291,15 @@ class TextSnippetsSettingsTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 		.setName("Snippets")
-		.setDesc("Type here your snippetLookup in format 'snippet : result', one per line. Empty lines will be ignored. Ctrl+Tab to replace (hotkey can be changed).")
-		.setClass("text-snippetLookup-class")
+		.setDesc("Type here your snippets in format 'snippet : result', one per line. Empty lines will be ignored. Ctrl+Tab to replace (hotkey can be changed).")
+		.setClass("text-snippets-class")
 		.addTextArea((text) =>
 			text
 			.setPlaceholder("before : after")
 			.setValue(this.plugin.settings.snippets_file)
 			.onChange(async (value) => {
 				this.plugin.settings.snippets_file = value;
-				this.plugin.UpdateSplit(this.plugin.settings.newlineSymbol);
+				this.plugin.UpdateSnippetLookup(this.plugin.settings.newlineSymbol);
 				await this.plugin.saveSettings();
 			})
 		);
@@ -328,7 +307,7 @@ class TextSnippetsSettingsTab extends PluginSettingTab {
 		new Setting(containerEl)
 		.setName("Cursor end position mark")
 		.setDesc("Places the cursor to the mark position after inserting a snippet (default: $end$).\nMark does not appear anywhere within the snippet. Do not use together with Stop Symbol.")
-		.setClass("text-snippetLookup-cursor")
+		.setClass("text-snippets-cursor")
 		.addTextArea((text) =>
 			text
 			.setPlaceholder("$end$")
@@ -344,8 +323,8 @@ class TextSnippetsSettingsTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 		.setName("Newline mark")
-		.setDesc("Ignores newline after mark, replace it with a newline character after expanding (default: $nl$).\nNecessary to write before every line break in multiline snippetLookup.")
-		.setClass("text-snippetLookup-newline")
+		.setDesc("Ignores newline after mark, replace it with a newline character after expanding (default: $nl$).\nNecessary to write before every line break in multiline snippets.")
+		.setClass("text-snippets-newline")
 		.addTextArea((text) =>
 			text
 			.setPlaceholder("$nl$")
@@ -355,7 +334,7 @@ class TextSnippetsSettingsTab extends PluginSettingTab {
 					value = '$nl$';
 				}
 				this.plugin.settings.newlineSymbol = value;
-				this.plugin.UpdateSplit(value);
+				this.plugin.UpdateSnippetLookup(value);
 				await this.plugin.saveSettings();
 			})
 		);
@@ -363,7 +342,7 @@ class TextSnippetsSettingsTab extends PluginSettingTab {
 		new Setting(containerEl)
 		.setName('Stop Symbol')
 		.setDesc('Symbol to jump to when command is called.')
-		.setClass("text-snippetLookup-tabstops")
+		.setClass("text-snippets-tabstops")
 		.addTextArea((text) => text
 			.setPlaceholder('')
 			.setValue(this.plugin.settings.stopSymbol)
@@ -380,7 +359,7 @@ class TextSnippetsSettingsTab extends PluginSettingTab {
 		new Setting(containerEl)
 		.setName('Clipboard paste Symbol')
 		.setDesc('Symbol to be replaced with clipboard content.')
-		.setClass("text-snippetLookup-tabstops")
+		.setClass("text-snippets-tabstops")
 		.addTextArea((text) => text
 			.setPlaceholder('')
 			.setValue(this.plugin.settings.pasteSymbol)
@@ -429,12 +408,13 @@ class TextSnippetsSettingsTab extends PluginSettingTab {
 		new Setting(containerEl)
 		.setName('Word delimiters')
 		.setDesc('Characters for specifying the boundary between separate words.')
-		.setClass("text-snippetLookup-delimiter")
+		.setClass("text-snippets-delimiter")
 		.addTextArea((text) => text
 			.setPlaceholder('')
 			.setValue(this.plugin.settings.wordDelimiters)
 			.onChange(async (value) => {
 				this.plugin.settings.wordDelimiters = value;
+				this.plugin.settings.wordDelimiterArray = Array.from(value);
 				await this.plugin.saveSettings();
 			})
 		);
