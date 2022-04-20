@@ -10,8 +10,6 @@ import {
 export default class TextSnippets extends Plugin {
 	settings: TextSnippetsSettings;
 
-	onInit() {}
-
 	async onload() {
 		console.log("Loading snippets plugin");
 		await this.loadSettings();
@@ -25,22 +23,13 @@ export default class TextSnippets extends Plugin {
 			}],
 		});
 
-		this.registerCodeMirror((editor) => {
-			// the callback has to be called through another function in order for 'this' to work
-			editor.on('keydown', (ed, event) => this.handleKeyDown(ed, event));
-			this.settings.isWYSIWYG = (typeof editor.wordAt === 'function');
-			
-			if(this.settings.isWYSIWYG) {
-				this.registerDomEvent(document, 'keydown', (event) => this.handleKeyDown(editor, event));
-			}
-		});
-
         if (this.settings.isWYSIWYG) {
             this.app.workspace.onLayoutReady(() => {
 				const editor = this.getEditor();
+				if(editor === null) return;
 
                 this.settings.isWYSIWYG = (typeof editor.wordAt === 'function');
-                this.registerDomEvent(document, 'keydown', (event) => this.handleKeyDown(editor, event));
+                this.registerDomEvent(document, 'keydown', (event) => this.handleKeyDown(event));
             }
         )}
 
@@ -165,6 +154,8 @@ export default class TextSnippets extends Plugin {
 
 	insertSnippet(key: string = ''): boolean {
 		const editor = this.getEditor();
+		if(editor === null) return;
+
 		const cursorOrig = editor.getCursor();
 		const cursorStart = editor.getCursor('from');
 		const cursorEnd = editor.getCursor('to');
@@ -207,14 +198,16 @@ export default class TextSnippets extends Plugin {
 		return true;
 	}
 
-	handleKeyDown (editor: Editor, event: KeyboardEvent): void {
-		if ((event.key == 'Tab' && this.settings.useTab) || (event.code == 'Space' && this.settings.useSpace)) {
-			this.SnippetOnTrigger(event.code, true);
+	handleKeyDown (event: KeyboardEvent): void {
+		if ((event.key === 'Tab' && this.settings.useTab) || (event.code === 'Space' && this.settings.useSpace)) {
+			this.SnippetOnTrigger(event.code, true, event);
 		}
 	}
 
-	SnippetOnTrigger(key: string = '', preventDefault: boolean=false) {
+	SnippetOnTrigger(key: string = '', preventDefault: boolean = false, event?: KeyboardEvent) {
 		const editor = this.getEditor();
+		if(editor === null) return;
+
 		const cursorStart = editor.getCursor();
 
 		if (!this.insertSnippet(key)) return;
@@ -250,6 +243,7 @@ export default class TextSnippets extends Plugin {
 	nextStop(): boolean {
 
 		const editor = this.getEditor();
+		if(editor === null) return;
 
 		const search = this.settings.isWYSIWYG
 			? editor.searchCursor(this.settings.stopSymbol, editor.getCursor())
@@ -270,8 +264,8 @@ export default class TextSnippets extends Plugin {
 	}
 
 	getEditor(): Editor {
-		const markdownView = this.app.workspace.activeLeaf.view as MarkdownView;
-		return markdownView.editor
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		return view?.editor;
 	}
 
 }
@@ -434,7 +428,7 @@ class TextSnippetsSettingsTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 		.setName('Word delimiters')
-		.setDesc('Сharacters for specifying the boundary between separate words.')
+		.setDesc('Characters for specifying the boundary between separate words.')
 		.setClass("text-snippetLookup-delimiter")
 		.addTextArea((text) => text
 			.setPlaceholder('')
